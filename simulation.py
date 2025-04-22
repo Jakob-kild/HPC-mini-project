@@ -1,7 +1,8 @@
 from os.path import join
 import sys
-
+import matplotlib.pyplot as plt
 import numpy as np
+from numba import njit
 
 
 def load_data(load_dir, bid):
@@ -11,7 +12,7 @@ def load_data(load_dir, bid):
     interior_mask = np.load(join(load_dir, f"{bid}_interior.npy"))
     return u, interior_mask
 
-
+#@profile
 def jacobi(u, interior_mask, max_iter, atol=1e-6):
     u = np.copy(u)
 
@@ -26,6 +27,23 @@ def jacobi(u, interior_mask, max_iter, atol=1e-6):
             break
     return u
 
+@njit
+def jacobi_numba(u, interior_indices, max_iter, atol):
+    u = u.copy()
+    for _ in range(max_iter):
+        delta = 0.0
+        for idx in range(interior_indices.shape[0]):
+            i, j = interior_indices[idx]
+            new_val = 0.25 * (u[i, j-1] + u[i, j+1] + u[i-1, j] + u[i+1, j])
+            diff = abs(u[i, j] - new_val)
+            if diff > delta:
+                delta = diff
+            u[i, j] = new_val
+        if delta < atol:
+            break
+    return u
+
+
 
 def summary_stats(u, interior_mask):
     u_interior = u[1:-1, 1:-1][interior_mask]
@@ -39,6 +57,17 @@ def summary_stats(u, interior_mask):
         'pct_above_18': pct_above_18,
         'pct_below_15': pct_below_15,
     }
+    
+def visualize_simulation_result(u, building_id, output_dir="plots"):
+    import os
+    os.makedirs(output_dir, exist_ok=True)
+    plt.imshow(u, cmap="hot")
+    plt.title(f"Simulated Temperature - Building {building_id}")
+    plt.colorbar(label="Temperature (°C)")
+    plt.savefig(os.path.join(output_dir, f"{building_id}_simulated.png"))
+    plt.close()
+
+    
 
 
 if __name__ == '__main__':
@@ -64,11 +93,14 @@ if __name__ == '__main__':
     # Run jacobi iterations for each floor plan
     MAX_ITER = 20_000
     ABS_TOL = 1e-4
-
+    
     all_u = np.empty_like(all_u0)
     for i, (u0, interior_mask) in enumerate(zip(all_u0, all_interior_mask)):
-        u = jacobi(u0, interior_mask, MAX_ITER, ABS_TOL)
+        interior_indices = np.argwhere(interior_mask)
+        u = jacobi_numba(u0, interior_indices, MAX_ITER, ABS_TOL)
         all_u[i] = u
+
+ 
 
     # Print summary statistics in CSV format
     stat_keys = ['mean_temp', 'std_temp', 'pct_above_18', 'pct_below_15']
