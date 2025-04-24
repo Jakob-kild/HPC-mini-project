@@ -15,32 +15,42 @@ def load_data(load_dir, bid):
 
 # CUDA kernel: performs a single Jacobi iteration
 @cuda.jit
-def jacobi_cuda_kernel(u, u_new, interior_mask):
+def jacobi_cuda_kernel(u, u_new, mask):
     i, j = cuda.grid(2)
+    if i < u.shape[0] and j < u.shape[1]:
+        # border: carry forward fixed boundary
+        if i == 0 or j == 0 or i == u.shape[0]-1 or j == u.shape[1]-1:
+            u_new[i, j] = u[i, j]
+        else:
+            if mask[i-1, j-1]:
+                # interior room
+                u_new[i, j] = 0.25 * (
+                    u[i-1, j] + u[i+1, j]
+                  + u[i, j-1] + u[i, j+1]
+                )
+            else:
+                # wall or outside
+                u_new[i, j] = u[i, j]
 
-    if 1 <= i < u.shape[0] - 1 and 1 <= j < u.shape[1] - 1:
-        if interior_mask[i - 1, j - 1]:  # interior_mask is 512x512, u is 514x514
-            u_new[i, j] = 0.25 * (
-                u[i - 1, j] + u[i + 1, j] + u[i, j - 1] + u[i, j + 1]
-            )
-
-# Host-side function: runs fixed iterations
 def jacobi_cuda(u0, interior_mask, max_iter=20000):
-    u = u0.copy()
-    u_d = cuda.to_device(u)
-    u_new_d = cuda.device_array_like(u)
+    # copy once
+    u_d      = cuda.to_device(u0)
+    u_new_d  = cuda.device_array_like(u0)
+    mask_d   = cuda.to_device(interior_mask.astype(np.uint8))
 
-    mask_d = cuda.to_device(interior_mask)
-
-    threads_per_block = (16, 16)
-    blocks_per_grid_x = (u.shape[0] + threads_per_block[0] - 1) // threads_per_block[0]
-    blocks_per_grid_y = (u.shape[1] + threads_per_block[1] - 1) // threads_per_block[1]
-    blocks_per_grid = (blocks_per_grid_x, blocks_per_grid_y)
+    # tuned block/grid
+    threads_per_block = (8, 32)
+    blocks_per_grid = (
+        (u0.shape[0] + threads_per_block[0] - 1)//threads_per_block[0],
+        (u0.shape[1] + threads_per_block[1] - 1)//threads_per_block[1],
+    )
 
     for _ in range(max_iter):
         jacobi_cuda_kernel[blocks_per_grid, threads_per_block](u_d, u_new_d, mask_d)
-        u_d, u_new_d = u_new_d, u_d  # swap buffers
+        u_d, u_new_d = u_new_d, u_d
 
+    # ensure completion before copy
+    cuda.synchronize()
     return u_d.copy_to_host()
 
 # Compute summary statistics
